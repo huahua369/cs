@@ -858,22 +858,21 @@ void udps_cx::on_recv(uv_udp_t* handle,
 	}
 	assert(nread > 0);
 	assert(addr->sa_family == AF_INET || addr->sa_family == AF_INET6);
-	std::string str;
-	if (rcvbuf->len)
-	{
-		str.assign(rcvbuf->base, nread);
-	}
-	int k = sizeof(sockaddr);
-	printf("udp:%p\t%s\n", handle, str.c_str());
+
 	if (p->rcb)
 	{
 		p->rcb((void*)addr, rcvbuf->base, nread);
 	}
-	p->send_data(addr, "123", 3);
-	//req = send_alloc();
-	////ASSERT_NOT_NULL(req);
-	//sndbuf = uv_buf_init(rcvbuf->base, nread);
-	//assert(0 <= uv_udp_send(req, handle, &sndbuf, 1, addr, on_send));
+	else
+	{
+		std::string str;
+		if (rcvbuf->len)
+		{
+			str.assign(rcvbuf->base, nread);
+		}
+		printf("udp:%p\t%s\n", handle, str.c_str());
+		p->send_data(addr, "123", 3);
+	}
 }
 
 
