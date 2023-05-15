@@ -28,8 +28,8 @@ int main()
 			});
 		tcp->run();
 	}
-	udpc_cx* p = new_udp_cl(ipv6 ? ip6 : ip, port, ipv6);
-	p->set_recv_cb([=](char* d, int len) {
+	udpc_cx* udp = new_udp_cl(ipv6 ? ip6 : ip, port, ipv6);
+	udp->set_recv_cb([=](char* d, int len) {
 		{
 			std::string str;
 			if (len)
@@ -53,7 +53,7 @@ int main()
 		if (str.size())
 		{
 			tcp->send_data(str.c_str(), str.size());
-			p->send_data(str.c_str(), str.size());
+			udp->send_data(str.c_str(), str.size());
 		}
 	}
 	free_tcp_cl(tcp);
