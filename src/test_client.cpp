@@ -52,14 +52,8 @@ int main()
 		}
 		if (str.size())
 		{
-			//if (tcp)
 			tcp->send_data(str.c_str(), str.size());
-			//for (size_t i = 0; i < 1024 * 1024; i++)
-			{
-				p->send_data(str.c_str(), str.size(), false);
-			}
-			//if (p)
-			//	p->send_data(str.c_str(), str.size());
+			p->send_data(str.c_str(), str.size());
 		}
 	}
 	free_tcp_cl(tcp);

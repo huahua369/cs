@@ -241,7 +241,8 @@ public:
 	~udpc_cx();
 	int set_ip(const char* ip, int port, int ipv6);
 	void set_recv_cb(std::function<void(char* d, int len)> cb);
-	void send_data(const void* d, int size, bool is_req);
+	// 第一次需要req
+	void send_data(const void* d, int size, bool is_req = false);
 	// 1472byte
 	void send_data_try(const void* d, int len);
 	void post();
