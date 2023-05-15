@@ -26,6 +26,7 @@
 #include <stdlib.h> 
 #include "cs.h"
 
+const size_t udpmaxs = (1024 * 64 - 256);// 1024 * 32;// 1472;
 sem_st* run_loop(uv_loop_t* loop, int r);
 
 // 对齐字节
@@ -159,15 +160,23 @@ client_cx::~client_cx()
 
 void client_cx::read_u(ssize_t nread, const uv_buf_t* buf)
 {
-	std::string str;
+	static std::string str;
 	if (nread > 0)
 	{
-		str.assign(buf->base, nread);
-		printf("%p\t%s\n", stream, str.c_str());
+		if (rcb)
+		{
+			(*rcb)(this, buf->base, nread);
+		}
+		else
+		{
+			str.assign(buf->base, nread);
+			printf("%p\t%s\n", stream, str.c_str());
+		}
 	}
 	else {
 		printf("客户端：%s\n", uv_strerror(nread));
 	}
+
 }
 
 void client_cx::close_cb(uv_handle_t* handle)
@@ -195,6 +204,7 @@ void client_cx::u_alloc(uv_handle_t* handle, size_t suggested_size, uv_buf_t* bu
 {
 	auto p = (client_cx*)handle->data;
 	assert(p);
+	//suggested_size = 1024 * 1024;
 	if (p)
 	{
 		if (p->b.len < suggested_size)
@@ -242,20 +252,30 @@ tcps_cx::~tcps_cx()
 {
 	ac.free_obj(ptr);
 }
-
+struct saddr_t
+{
+	union {
+		struct sockaddr_in addr;
+		struct sockaddr_in6 addr6;
+	}v = {};
+};
+saddr_t get_addr(int port, int ipv6, const char* ip)
+{
+	saddr_t a = {};
+	int	r = ipv6 ? uv_ip6_addr(ip ? ip : "::1", port, &a.v.addr6) : uv_ip4_addr(ip ? ip : "127.0.0.1", port, &a.v.addr);
+	return a;
+}
 void tcps_cx::bind(int port, int ipv6, const char* ip)
 {
 	int r;
 	do
 	{
 		if (port < 1) break;
-		struct sockaddr_in addr = {};
-		struct sockaddr_in6 addr6 = {};
-		r = ipv6 ? uv_ip6_addr(ip ? ip : "::1", port, &addr6) : uv_ip4_addr(ip ? ip : "127.0.0.1", port, &addr);
-		if (r != 0)break;
-		auto p = (ipv6) ? (sockaddr*)&addr6 : (sockaddr*)&addr;
+		auto addr = get_addr(port, ipv6, ip);
+		auto p = (sockaddr*)&addr;
 		uv_tcp_bind(ptr, p, 0);
 		r = uv_listen((uv_stream_t*)ptr, SOMAXCONN, on_connection);
+		if (r != 0)break;
 		sem = run_loop(loop, r);
 	} while (0);
 }
@@ -279,14 +299,18 @@ void tcps_cx::on_connection(uv_stream_t* server, int status)
 	auto pc = new client_cx();
 	if (pc)
 	{
+		if (p->rcb)
+			pc->rcb = &p->rcb;
 		pc->accept_u(server);
+		if (p->conn_cb)
+			p->conn_cb(pc);
 	}
 }
 
 
 tcpc_cx::tcpc_cx()
 {
-	uvreq = ac.new_obj<uv_write_t>();
+	//uvreq = ac.new_obj<uv_write_t>();
 	acb = [=]() {
 		if (rs)
 		{
@@ -306,7 +330,7 @@ tcpc_cx::~tcpc_cx()
 		uv_stop(loop);
 		free_sem(sem);
 	}
-	ac.free_obj(uvreq);
+	//ac.free_obj(uvreq);
 	ac.free_obj(paddr);
 	ac.free_obj(ctp);
 	ac.free_obj(cli);
@@ -358,14 +382,19 @@ void tcpc_cx::send_datas()
 			auto p = _data.front();
 			if (p.base && p.len)
 			{
-				uv_buf_t buf = uv_buf_init((char*)p.base, p.len);
-				uvreq->data = p.base - sizeof(int);
-				int r = uv_write(uvreq, (uv_stream_t*)cli, &buf, 1, write_cb);
-				if (r != 0)
+				uv_buf_t buf = uv_buf_init((char*)p.base, (size_t)p.len);
+				//uvreq->data = p.base - sizeof(int);
+				/*			int r = uv_write(uvreq, (uv_stream_t*)cli, &buf, 1, write_cb);
+							if (r != 0)
+							{
+								rs = 1;
+								printf("%s\n", uv_strerror(r));
+							}*/
+				auto n = uv_try_write((uv_stream_t*)cli, &buf, 1);
+				if (n < 0)
 				{
-					rs = 1;
+					printf("%s\n", uv_strerror(n));
 				}
-				printf("%s\n", uv_strerror(r));
 			}
 			_data.pop();
 		}
@@ -378,14 +407,24 @@ void tcpc_cx::send_data(const void* d, int size)
 	if (!d || size < 1 || rs != 0)return;
 	lk.lock();
 	buf_tx b = {};
-	//b.req = new_obj<uv_tcp_send_t>();
-	b.base = (char*)ac.new_mem(sizeof(int) + size);
+	b.base = (char*)d;
 	b.len = size;
-	*((int*)b.base) = sizeof(int) + size;
-	b.base += sizeof(int);
-	memcpy(b.base, d, size);
 	_data.push(b);
 	lk.unlock();
+	post();
+}
+void tcpc_cx::send_data_try(const void* d, int size)
+{
+	if (!d || size < 1 || rs != 0)return;
+	lk.lock();
+	buf_tx b = {};
+	b.base = (char*)d;
+	b.len = size;
+	_data.push(b);
+	lk.unlock();
+}
+void tcpc_cx::post()
+{
 	if (_async)
 	{
 		uv_async_send(_async);
@@ -451,9 +490,6 @@ void tcpc_cx::on_connect(uv_connect_t* req, int status)
 	uv_read_start((uv_stream_t*)req->handle, alloc_buffer, read_client_cb);
 	assert((uv_stream_t*)cli == req->handle);
 	rs = 0;
-	std::string str = "hello server, this is client!";
-	send_data((char*)str.c_str(), str.size());
-
 	fprintf(stdout, "Connect ok\n");
 
 }
@@ -471,27 +507,10 @@ int tcpc_cx::conntect(const char* ip, int port, int ipv6)
 	ctp->data = this;
 
 	uv_tcp_init(loop, cli);
-	if (ipv6 == 0)
-	{
-		if (!paddr)
-		{
-			auto ad = ac.new_obj<sockaddr_in>();
-			paddr = (struct sockaddr*)ad;
-		}
-		r = uv_ip4_addr(ip, port, (sockaddr_in*)paddr);
-		r = uv_tcp_connect(ctp, cli, (const struct sockaddr*)paddr, on_connect1);
 
-	}
-	else
-	{
-		if (!paddr)
-		{
-			auto ad = ac.new_obj<sockaddr_in6>();
-			paddr = (struct sockaddr*)ad;
-		}
-		if (0 != uv_ip6_addr(ip, port, (sockaddr_in6*)paddr))return 1;
-		r = uv_tcp_connect(ctp, cli, (const struct sockaddr*)paddr, on_connect1);
-	}
+	auto addr = ac.new_obj<saddr_t>(get_addr(port, ipv6, ip));
+	paddr = (sockaddr*)addr;
+	r = uv_tcp_connect(ctp, cli, (const struct sockaddr*)paddr, on_connect1);
 	return r;
 }
 
@@ -592,6 +611,11 @@ int udpc_cx::set_ip(const char* ip, int port, int ipv6)
 		cli->data = this;
 		uv_udp_init(loop, cli);
 	}
+
+	//auto addr = ac.new_obj<saddr_t>(get_addr(port, ipv6, ip));
+	//paddr = (sockaddr*)addr;
+
+
 	if (ipv6 == 0)
 	{
 		if (!paddr)
@@ -610,7 +634,7 @@ int udpc_cx::set_ip(const char* ip, int port, int ipv6)
 			auto ad = ac.new_obj<sockaddr_in6>();
 			paddr = (struct sockaddr*)ad;
 		}
-		r = uv_ip6_addr("0.0.0.0", 0, (sockaddr_in6*)paddr);
+		r = uv_ip6_addr("::", 0, (sockaddr_in6*)paddr);
 		r = uv_udp_bind(cli, (const struct sockaddr*)paddr, 0);
 		if (0 != uv_ip6_addr(ip, port, (sockaddr_in6*)paddr))return 1;
 	}
@@ -649,16 +673,17 @@ static void alloc_cb(uv_handle_t* handle,
 	buf->len = sizeof(slab);
 }
 
-void us_cb(uv_udp_send_t* req, int status)
+void base_uv::us_cb(uv_udp_send_t* req, int status)
 {
 	if (req)
 	{
 		auto p = (base_uv*)req->handle->data;
 		auto r = uv_udp_recv_start(req->handle, alloc_cb, cl_recv_cb);
-		if (p)
+		if (p && req->data)
 		{
-			p->ac.free_mem((char*)req->data, *(int*)req->data);
+			p->lk.lock();
 			p->ac.free_obj(req);
+			p->lk.unlock();
 		}
 	}
 }
@@ -673,32 +698,82 @@ void udpc_cx::send_datas()
 			if (p.base && p.len)
 			{
 				uv_buf_t buf = uv_buf_init((char*)p.base, p.len);
-				p.req->data = p.base - sizeof(int);
-				uv_udp_send(p.req,
-					cli,
-					&buf,
-					1,
-					paddr,
-					us_cb);
+				assert(p.len <= udpmaxs);
+				if (p.req)
+					uv_udp_send(p.req, cli, &buf, 1, paddr, us_cb);
+				else
+					uv_udp_try_send(cli, &buf, 1, paddr);
 			}
 			_data.pop();
 		}
 		lk.unlock();
 	}
 }
-void udpc_cx::send_data(const void* d, int size)
+
+void udpc_cx::send_data(const void* d, int size, bool is_req)
+{
+	static int ka = 0;
+	ka++;
+	if (!d || size < 1)return;
+	lk.lock();
+	udp_buf_t b = {};
+	b.base = (char*)d;
+	b.len = size;
+	if (is_req)
+		b.req = ac.new_obj<uv_udp_send_t>();
+	_data.push(b);
+#if 0
+	int len = size;
+	int chunks = len / udpmaxs;
+	int remainder = len % udpmaxs;
+	int total = chunks;
+	if (remainder > 0)
+	{
+		total++;
+	}
+	char* pt = (char*)d;
+	for (size_t i = 0; i < chunks; i++)
+	{
+		udp_buf_t b = {};
+		b.req = ac.new_obj<uv_udp_send_t>();
+		b.base = (char*)ac.new_mem(udpmaxs + sizeof(int));
+		b.len = udpmaxs;
+		*((int*)b.base) = sizeof(int) + udpmaxs;
+		b.base += sizeof(int);
+		b.addr = b.base + sizeof(int);
+		memcpy(b.base, pt, udpmaxs);
+		_data.push(b);
+		pt += udpmaxs;
+	}
+	if (remainder > 0)
+	{
+		udp_buf_t b = {};
+		b.req = ac.new_obj<uv_udp_send_t>();
+		b.base = (char*)ac.new_mem(remainder + sizeof(int));
+		b.len = remainder;
+		*((int*)b.base) = sizeof(int) + remainder;
+		b.base += sizeof(int);
+		b.addr = b.base + sizeof(int);
+		memcpy(b.base, pt, remainder);
+		_data.push(b);
+		pt += remainder;
+}
+#endif
+	lk.unlock();
+	post();
+}
+void udpc_cx::send_data_try(const void* d, int size)
 {
 	if (!d || size < 1)return;
 	lk.lock();
 	udp_buf_t b = {};
-	b.req = ac.new_obj<uv_udp_send_t>();
-	b.base = ac.new_mem<char>(size + sizeof(int));
+	b.base = (char*)d;
 	b.len = size;
-	*((int*)b.base) = sizeof(int) + size;
-	b.base += sizeof(int);
-	memcpy(b.base, d, size);
 	_data.push(b);
 	lk.unlock();
+}
+void udpc_cx::post()
+{
 	if (_async)
 	{
 		uv_async_send(_async);
@@ -707,6 +782,24 @@ void udpc_cx::send_data(const void* d, int size)
 	{
 		send_datas();
 	}
+
+}
+
+void udpc_cx::send_data_try0(const void* d, int size)
+{
+	if (!d || size < 1)return;
+	udp_buf_t b = {};
+	b.base = (char*)d;
+	b.len = size;
+	_data.push(b);
+}
+void udpc_cx::lock()
+{
+	lk.lock();
+}
+void udpc_cx::unlock()
+{
+	lk.unlock();
 }
 void udpc_cx::set_recv_cb(std::function<void(char* d, int len)> cb)
 {
@@ -750,9 +843,8 @@ static void slab_alloc(uv_handle_t* handle,
 
 int udps_cx::bind(int port, int ipv6, const char* ip)
 {
-	struct sockaddr_in addr = {};
-	struct sockaddr_in6 addr6 = {};
-	int r = ipv6 ? uv_ip6_addr(ip ? ip : "::1", port, &addr6) : uv_ip4_addr(ip ? ip : "127.0.0.1", port, &addr);
+	int r = 0;
+	auto addr = (get_addr(port, ipv6, ip));
 
 	if (0 != r)return 1;
 
@@ -762,7 +854,7 @@ int udps_cx::bind(int port, int ipv6, const char* ip)
 		return 1;
 	}
 
-	r = uv_udp_bind(ptr, (ipv6 ? (const struct sockaddr*)&addr6 : (const struct sockaddr*)&addr), 0);
+	r = uv_udp_bind(ptr, (const struct sockaddr*)&addr, 0);
 	if (r) {
 		fprintf(stderr, "uv_udp_bind: %s\n", uv_strerror(r));
 		return 1;
@@ -793,7 +885,7 @@ void udps_cx::send_data(const void* addr, const char* d, int size)
 	udp_buf_t b = {};
 	b.req = ac.new_obj<uv_udp_send_t>();
 	int as = size + sizeof(int) + v6;
-	auto t = ac.new_mem<char>(as);
+	auto t = (char*)ac.new_mem(as);
 	b.len = size;
 	*((int*)t) = as;
 	b.addr = t + sizeof(int);
@@ -812,16 +904,19 @@ void udps_cx::send_data(const void* addr, const char* d, int size)
 	}
 }
 
-void us_cbs(uv_udp_send_t* req, int status)
+void base_uv::us_cbs(uv_udp_send_t* req, int status)
 {
 	if (req)
 	{
 		auto p = (base_uv*)req->handle->data;
-		auto r = uv_udp_recv_start(req->handle, alloc_cb, cl_recv_cb);
-		if (p)
+		//auto r = uv_udp_recv_start(req->handle, alloc_cb, cl_recv_cb);
+		if (p && req->data)
 		{
+			p->lk.lock();
 			p->ac.free_mem((char*)req->data, *(int*)req->data);
 			p->ac.free_obj(req);
+
+			p->lk.unlock();
 		}
 	}
 }
@@ -829,15 +924,36 @@ void udps_cx::send_datas()
 {
 	if (_data.size())
 	{
+		const size_t ss = udpmaxs;
 		lk.lock();
 		for (; _data.size();)
 		{
 			auto p = _data.front();
 			if (p.base && p.len)
 			{
-				uv_buf_t buf = uv_buf_init((char*)p.base, p.len);
+				int len = p.len;
+				int chunks = len / ss;
+				int remainder = len % ss;
+				int total = chunks;
+				if (remainder > 0)
+				{
+					total++;
+				}
+				char* pt = (char*)p.base;
 				p.req->data = (char*)p.addr - sizeof(int);
-				uv_udp_send(p.req, ptr, &buf, 1, (sockaddr*)p.addr, us_cbs);
+				for (size_t i = 0; i < chunks; i++)
+				{
+					uv_buf_t buf = uv_buf_init(pt, ss);
+					//uv_udp_send(p.req, ptr, &buf, 1, (sockaddr*)p.addr, total - 1 == i ? us_cbs : nullptr);
+					uv_udp_try_send(ptr, &buf, 1, (sockaddr*)p.addr);
+					pt += ss;
+				}
+				if (remainder > 0)
+				{
+					uv_buf_t buf = uv_buf_init(pt, remainder);
+					//uv_udp_send(p.req, ptr, &buf, 1, (sockaddr*)p.addr, us_cbs);
+					uv_udp_try_send(ptr, &buf, 1, (sockaddr*)p.addr);
+				}
 			}
 			_data.pop();
 		}
@@ -850,8 +966,9 @@ void udps_cx::on_recv(uv_udp_t* handle,
 	const struct sockaddr* addr,
 	unsigned flags) {
 
+	static std::string str;
 	auto p = (udps_cx*)handle->data;
-
+	//printf("%d\n", nread);
 	if (!p || nread == 0) {
 		/* Everything OK, but nothing read. */
 		return;
@@ -865,13 +982,12 @@ void udps_cx::on_recv(uv_udp_t* handle,
 	}
 	else
 	{
-		std::string str;
 		if (rcvbuf->len)
 		{
 			str.assign(rcvbuf->base, nread);
 		}
 		printf("udp:%p\t%s\n", handle, str.c_str());
-		p->send_data(addr, "123", 3);
+		//p->send_data(addr, "123", 3);
 	}
 }
 

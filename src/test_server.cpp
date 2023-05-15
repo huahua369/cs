@@ -19,7 +19,7 @@ using namespace std;
 int main()
 {
 	cout << "Hello server." << canipv6() << endl;
-	int ip6 = 1;
+	int ip6 = 0;
 	int port = 9123;
 	const char* pipename = TEST_PIPENAME;
 	tcps_cx* tcp = new tcps_cx();

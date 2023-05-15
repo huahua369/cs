@@ -54,7 +54,7 @@ using spool_t = std::pmr::synchronized_pool_resource;		// 线程安全的
 #undef max
 #undef min
 #endif // max
-
+#define maxblock_ss 1024*1024
 class usp_ac
 {
 public:
@@ -67,7 +67,11 @@ public:
 	void* new_mem(size_t n)
 	{
 		n = std::max((size_t)1, n);
-		auto p = _alloc.allocate(n, _Align);
+		void* p = 0;
+		if (n < maxblock_ss)
+			p = _alloc.allocate(n, _Align);
+		else
+			p = alloc_m(n, _Align);
 		memset(p, 0, n);
 		return p;
 	}
@@ -106,7 +110,14 @@ public:
 		auto ptr = t;
 		if (t && n > 0)
 		{
-			_alloc.deallocate(t, sizeof(T) * n, _Align);
+			if (n < maxblock_ss)
+			{
+				_alloc.deallocate(t, sizeof(T) * n, _Align);
+			}
+			else
+			{
+				free_m(t);
+			}
 		}
 	}
 	template<class T, class... Ts>
@@ -124,8 +135,24 @@ public:
 		if (t)
 		{
 			std::destroy_at(ptr);
-			_alloc.deallocate(t, sizeof(T), _Align);
+			free_mem(t, 1);
+			//_alloc.deallocate(t, sizeof(T), _Align);
 		}
+	}
+	template<typename T> inline T alignUp(const T& val, T alignment)
+	{
+		T r = (val + alignment - (T)1) & ~(alignment - (T)1);
+		return r;
+	}
+	void* alloc_m(size_t size, size_t a)
+	{
+		auto ns = alignUp(size, a);
+		return ns > 0 ? malloc(ns) : nullptr;
+	}
+	void free_m(void* p)
+	{
+		if (p)
+			free(p);
 	}
 };
 
@@ -173,6 +200,7 @@ public:
 	uv_loop_t* loop = 0;
 	sem_st* sem = 0;
 	std::function<void()> acb;
+	std::mutex lk;
 public:
 	base_uv();
 	virtual	~base_uv();
@@ -181,6 +209,8 @@ public:
 	// 线程调用
 	virtual	void send_datas();
 	static void async_cb(uv_async_t* handle);
+	static void us_cb(uv_udp_send_t* req, int status);
+	static void us_cbs(uv_udp_send_t* req, int status);
 private:
 
 };
@@ -203,19 +233,25 @@ class udpc_cx :public base_uv
 public:
 	uv_udp_t* cli = 0;
 	struct sockaddr* paddr = 0;
-	std::function<void(char* d, int len)> rcb;
+	std::function<void(char* d, int len)> rcb; // 读回调
 	std::queue<udp_buf_t> _data;
-	std::mutex lk;
 
 public:
 	udpc_cx();
 	~udpc_cx();
 	int set_ip(const char* ip, int port, int ipv6);
 	void set_recv_cb(std::function<void(char* d, int len)> cb);
-	void send_data(const void* d, int size);
+	void send_data(const void* d, int size, bool is_req);
+	// 1472byte
+	void send_data_try(const void* d, int len);
+	void post();
+
+	void send_data_try0(const void* d, int len);
+	void lock();
+	void unlock();
+private:
 	// 线程调用
 	void send_datas();
-private:
 };
 // udp服务端
 class udps_cx :public base_uv
@@ -224,7 +260,7 @@ public:
 	uv_udp_t* ptr;
 	std::function<void(void* addr, char* d, int len)> rcb;
 	std::queue<udp_buf_t> _data;
-	std::mutex lk;
+
 public:
 	udps_cx();
 	~udps_cx();
@@ -252,6 +288,8 @@ public:
 	buf_tx b = {};
 	// 
 	uv_stream_t* stream = 0;
+
+	std::function<void(client_cx*, char* d, int len)>* rcb = 0;
 public:
 	client_cx();
 	~client_cx();
@@ -272,6 +310,8 @@ class tcps_cx :public base_uv
 public:
 	uv_tcp_t* ptr = 0;
 
+	std::function<void(client_cx*, char* d, int len)> rcb;
+	std::function<void(client_cx*)> conn_cb;
 public:
 	tcps_cx();
 	~tcps_cx();
@@ -288,10 +328,9 @@ public:
 	uv_tcp_t* cli = 0;
 	struct sockaddr* paddr = 0;
 	uv_connect_t* ctp = 0;
-	uv_write_t* uvreq = 0;
+	//uv_write_t* uvreq = 0;
 
 	std::queue<buf_tx> _data;
-	std::mutex lk;
 	std::function<void(char* d, int len)> rcb;
 
 	int rs = 0;
@@ -305,6 +344,8 @@ public:
 	void set_recv_cb(std::function<void(char* d, int len)> cb);
 	void run();
 	void send_data(const void* d, int size);
+	void send_data_try(const void* d, int size);
+	void post();
 private:
 	void send_datas();
 	void on_connect(uv_connect_t* req, int status);
