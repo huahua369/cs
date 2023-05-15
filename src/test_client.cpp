@@ -17,27 +17,23 @@ int main()
 	if (tcp)
 	{
 		tcp->set_recv_cb([=](char* d, int len) {
-			{
-				std::string str;
-				if (len)
-				{
-					str.assign(d, len);
-				}
-				printf("收到 %s\n", str.c_str());
-			}
-			});
-		tcp->run();
-	}
-	udpc_cx* udp = new_udp_cl(ipv6 ? ip6 : ip, port, ipv6);
-	udp->set_recv_cb([=](char* d, int len) {
-		{
 			std::string str;
 			if (len)
 			{
 				str.assign(d, len);
 			}
 			printf("收到 %s\n", str.c_str());
+			});
+		tcp->run();
+	}
+	udpc_cx* udp = new_udp_cl(ipv6 ? ip6 : ip, port, ipv6);
+	udp->set_recv_cb([=](char* d, int len) {
+		std::string str;
+		if (len)
+		{
+			str.assign(d, len);
 		}
+		printf("收到 %s\n", str.c_str());
 		});
 
 	int ss[] = { sizeof(sockaddr_in), sizeof(sockaddr_in6) };
@@ -57,7 +53,7 @@ int main()
 		}
 	}
 	free_tcp_cl(tcp);
-	free_udp_cl(p);
+	free_udp_cl(udp);
 	return 0;
 }
 #ifndef _WIN32
