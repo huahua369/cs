@@ -10,7 +10,7 @@ if (POLICY CMP0141)
 endif()
 
 project ("uvtest")
- 
+ set(DCMAKE_TOOLCHAIN_FILE C:/sdk/vcpkg/scripts/buildsystems/vcpkg.cmake)
 #设置库文件输出目录
 set(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/out/bin)
 #设置执行文件输出目录
@@ -39,11 +39,11 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET ${client_n} PROPERTY CXX_STANDARD 20)
 endif()
 
-find_package(unofficial-libuv CONFIG REQUIRED)
+ find_package(unofficial-libuv CONFIG REQUIRED)
 #连接动态库
 set(st 
 	#uv
-	unofficial::libuv::libuv
+	unofficial::libuv::libuv 
 )
 target_link_libraries(${server_n}  PRIVATE ${st})
 target_link_libraries(${client_n}  PRIVATE ${st})
